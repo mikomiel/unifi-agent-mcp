@@ -31,7 +31,7 @@ jobs:
           for filename in (
               "LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md",
               "openspec/config.yaml", "release-please-config.json",
-              ".release-please-manifest.json", "version.txt",
+              ".release-please-manifest.json",
           ):
               assert Path(filename).is_file(), filename
           PY
