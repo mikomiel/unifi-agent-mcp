@@ -1,11 +1,18 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "simple",
+  "release-type": "python",
   "include-v-in-tag": true,
   "include-component-in-tag": false,
   "packages": {
     ".": {
-      "package-name": "unifi-agent-mcp"
+      "package-name": "unifi-agent-mcp",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='unifi-agent-mcp')].version"
+        }
+      ]
     }
   }
 }
