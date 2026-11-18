@@ -744,6 +744,7 @@ def _client_sites(
             truncated
             or clients_page.truncated
             or networks_page.truncated
+            or zones_page.truncated
             or devices_page.truncated
         )
         if network_partial:

@@ -529,16 +529,16 @@ def test_active_clients_filters_and_marks_network_inference() -> None:
     assert "must-not-leak" not in json.dumps(result)
 
 
-class TruncatedClientsApi(FixtureApi):
-    def get_all(self, path: str) -> api.PageResult:
-        result = super().get_all(path)
-        if path.endswith("/clients"):
-            return api.PageResult(result.items, 2050, True)
-        return result
+@pytest.mark.parametrize("relation", ["clients", "firewall/zones"])
+def test_active_clients_propagates_upstream_truncation_as_partial(relation) -> None:
+    class TruncatedRelationApi(FixtureApi):
+        def get_all(self, path: str) -> api.PageResult:
+            result = super().get_all(path)
+            if path.endswith(f"/{relation}"):
+                return api.PageResult(result.items, 2050, True)
+            return result
 
-
-def test_active_clients_propagates_upstream_truncation_as_partial() -> None:
-    result = api.build_active_clients(TruncatedClientsApi(), None, None, 0, 100)
+    result = api.build_active_clients(TruncatedRelationApi(), None, None, 0, 100)
     assert result["truncated"] is True
     assert result["partial"] is True
 
