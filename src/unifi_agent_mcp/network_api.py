@@ -1,7 +1,8 @@
-"""Bounded read-only adapter for the local UniFi Network Integration API."""
+"""Bounded transport and inspection adapter for the local UniFi Network Integration API."""
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import ssl
@@ -14,6 +15,7 @@ from typing import Any
 
 API_SCHEMA = "unifi-read.v1"
 PAGE_LIMIT = 200
+MAX_SELECTOR_ITEMS = 200
 MAX_ITEMS_PER_FAMILY = 2_000
 MAX_RESPONSE_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 10
@@ -139,7 +141,7 @@ class UniFiNetworkApi:
             raise UniFiApiError(
                 "UNIFI_TLS_FAILED", "controller certificate verification failed"
             ) from error
-        except (urllib.error.URLError, TimeoutError) as error:
+        except (OSError, http.client.HTTPException) as error:
             reason = getattr(error, "reason", error)
             if isinstance(reason, (ssl.SSLError, ssl.CertificateError)):
                 raise UniFiApiError(
@@ -413,30 +415,41 @@ _FILTER_KEYS = frozenset(
 )
 
 
-def _safe_filter(value: Any) -> Any:
+def _safe_filter(value: Any) -> tuple[Any, bool]:
     if isinstance(value, dict):
-        return {
+        entries = {
             key: _safe_filter(item)
             for key, item in value.items()
             if key in _FILTER_KEYS
         }
+        return (
+            {key: item for key, (item, _) in entries.items()},
+            any(truncated for _, truncated in entries.values()),
+        )
     if isinstance(value, list):
-        return [_safe_filter(item) for item in value[:200]]
+        entries = [_safe_filter(item) for item in value[:MAX_SELECTOR_ITEMS]]
+        return (
+            [item for item, _ in entries],
+            len(value) > MAX_SELECTOR_ITEMS
+            or any(truncated for _, truncated in entries),
+        )
     if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    return None
+        return value, False
+    return None, False
 
 
 def normalize_traffic_list(raw: dict[str, Any]) -> dict[str, Any]:
+    raw_items = raw.get("items")
+    members = raw_items if isinstance(raw_items, list) else []
+    items = [_normalize_matching_item(item) for item in members[:MAX_SELECTOR_ITEMS]]
     result = {
         "id": _text(raw.get("id")),
         "name": _text(raw.get("name")),
         "type": _text(raw.get("type")),
-        "items": [_normalize_matching_item(item) for item in raw.get("items", [])[:200]]
-        if isinstance(raw.get("items"), list)
-        else [],
+        "items": [item for item in items if item],
     }
-    result["items"] = [item for item in result["items"] if item]
+    if len(members) > MAX_SELECTOR_ITEMS:
+        result["truncated"] = True
     return {key: value for key, value in result.items() if value not in (None, [])}
 
 
@@ -469,28 +482,40 @@ def normalize_policy(raw: dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw.get("ipProtocolScope"), dict)
         else {}
     )
+    filters = {
+        name: _safe_filter(value)
+        for name, value in (
+            ("action", action),
+            ("source", source.get("trafficFilter")),
+            ("destination", destination.get("trafficFilter")),
+            ("ip_protocol_scope", protocol),
+            ("schedule", raw.get("schedule")),
+        )
+    }
     result = {
         "id": _text(raw.get("id")),
         "name": _text(raw.get("name")),
         "description": _text(raw.get("description")),
         "enabled": _boolean(raw.get("enabled")),
         "index": _integer(raw.get("index")),
-        "action": _safe_filter(action),
+        "action": filters["action"][0],
         "source": {
             "zone_id": _text(source.get("zoneId")),
-            "traffic_filter": _safe_filter(source.get("trafficFilter")),
+            "traffic_filter": filters["source"][0],
         },
         "destination": {
             "zone_id": _text(destination.get("zoneId")),
-            "traffic_filter": _safe_filter(destination.get("trafficFilter")),
+            "traffic_filter": filters["destination"][0],
         },
-        "ip_protocol_scope": _safe_filter(protocol),
+        "ip_protocol_scope": filters["ip_protocol_scope"][0],
         "connection_states": _strings(raw.get("connectionStateFilter")),
         "ipsec_filter": _text(raw.get("ipsecFilter")),
         "logging_enabled": _boolean(raw.get("loggingEnabled")),
-        "schedule": _safe_filter(raw.get("schedule")),
+        "schedule": filters["schedule"][0],
         "metadata": _metadata(raw.get("metadata")),
     }
+    if any(truncated for _, truncated in filters.values()):
+        result["truncated"] = True
     for side in (result["source"], result["destination"]):
         for key in list(side):
             if side[key] in (None, {}):
@@ -546,12 +571,12 @@ def _device_details(
     return normalized, partial
 
 
-def _site_pages(api: UniFiNetworkApi) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _site_pages(api: UniFiNetworkApi) -> tuple[dict[str, Any], PageResult]:
     info = api.get("/v1/info")
     sites = api.get_all("/v1/sites")
     if not sites.items:
         raise UniFiApiError("UNIFI_RESPONSE_INVALID", "controller returned no sites")
-    return info, sites.items
+    return info, sites
 
 
 def _envelope(
@@ -580,11 +605,11 @@ def _optional_page(
 
 
 def build_config_map(api: UniFiNetworkApi) -> dict[str, Any]:
-    info, raw_sites = _site_pages(api)
+    info, sites_page = _site_pages(api)
     unavailable: set[str] = set()
     sites = []
-    truncated = False
-    for raw_site in raw_sites:
+    truncated = sites_page.truncated
+    for raw_site in sites_page.items:
         site = normalize_site(raw_site)
         site_id = site.get("id")
         if not isinstance(site_id, str):
@@ -672,11 +697,11 @@ def _attach_network(
 def _client_sites(
     api: UniFiNetworkApi,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], set[str], bool]:
-    info, raw_sites = _site_pages(api)
+    info, sites_page = _site_pages(api)
     unavailable: set[str] = set()
     sites = []
-    truncated = False
-    for raw_site in raw_sites:
+    truncated = sites_page.truncated
+    for raw_site in sites_page.items:
         site = normalize_site(raw_site)
         site_id = site.get("id")
         if not isinstance(site_id, str):
@@ -813,11 +838,11 @@ def build_firewall_policies(
     source_zone_id: str | None,
     destination_zone_id: str | None,
 ) -> dict[str, Any]:
-    info, raw_sites = _site_pages(api)
+    info, sites_page = _site_pages(api)
     unavailable: set[str] = set()
     sites = []
-    truncated = False
-    for raw_site in raw_sites:
+    truncated = sites_page.truncated
+    for raw_site in sites_page.items:
         site = normalize_site(raw_site)
         site_id = site.get("id")
         if not isinstance(site_id, str):
@@ -871,6 +896,8 @@ def build_firewall_policies(
             or policies_page.truncated
             or zones_page.truncated
             or lists_page.truncated
+            or any(policy.get("truncated") for policy in policies)
+            or any(matching_list.get("truncated") for matching_list in lists.values())
         )
     result = _envelope(info, bool(unavailable) or truncated, unavailable, truncated)
     result["sites"] = sites
@@ -914,13 +941,16 @@ def build_endpoint_trace(api: UniFiNetworkApi, identifier: str) -> dict[str, Any
             client, policies_result
         )
     unavailable = client_unavailable | set(policies_result["unavailable_relations"])
+    upstream_truncated = client_truncated or policies_result["truncated"]
     result = {
         "schema": API_SCHEMA,
         "observed_at": datetime.now(UTC).isoformat(),
         "controller": {"application_version": _text(info.get("applicationVersion"))},
-        "partial": bool(unavailable) or client_truncated or policies_result["partial"],
+        "partial": bool(unavailable)
+        or upstream_truncated
+        or policies_result["partial"],
         "unavailable_relations": sorted(unavailable),
-        "truncated": len(candidates) > 20 or client_truncated,
+        "truncated": len(candidates) > 20 or upstream_truncated,
         "identifier": identifier,
         "matches": matches,
         "totals": {"matching": len(candidates), "returned": len(matches)},

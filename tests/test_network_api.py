@@ -140,6 +140,7 @@ class JsonHandler(BaseHTTPRequestHandler):
 @contextmanager
 def https_json_server(certificate_path: Path, key_path: Path) -> Iterator[str]:
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.minimum_version = ssl.TLSVersion.TLSv1_2
     server_context.load_cert_chain(certificate_path, key_path)
     server = HTTPServer(("127.0.0.1", 0), JsonHandler)
     server.socket = server_context.wrap_socket(server.socket, server_side=True)
@@ -612,6 +613,9 @@ def test_firewall_matching_list_members_are_allowlisted_and_bounded() -> None:
     matching_list = result["sites"][0]["policies"][0]["traffic_matching_lists"][0]
     assert len(matching_list["items"]) == 200
     assert matching_list["items"][0] == {"type": "PORT_NUMBER", "value": 1}
+    assert matching_list["truncated"] is True
+    assert result["partial"] is True
+    assert result["truncated"] is True
     assert "must-not-leak" not in json.dumps(result)
 
 
@@ -716,3 +720,60 @@ def test_optional_relation_is_reported_as_partial() -> None:
     result = api.build_config_map(PartialApi())
     assert result["partial"] is True
     assert "firewall_zones" in result["unavailable_relations"]
+
+
+class TruncatedSitesApi(FixtureApi):
+    def get_all(self, path: str) -> api.PageResult:
+        page = super().get_all(path)
+        if path == "/v1/sites":
+            return api.PageResult(page.items, 2, True)
+        return page
+
+
+def test_inspection_tools_report_a_truncated_site_collection() -> None:
+    fixture = TruncatedSitesApi()
+    results = (
+        api.build_config_map(fixture),
+        api.build_active_clients(fixture, None, None, 0, 100),
+        api.build_firewall_policies(fixture, None, None, None),
+        api.build_endpoint_trace(fixture, "192.0.2.25"),
+    )
+    for result in results:
+        assert result["partial"] is True
+        assert result["truncated"] is True
+
+
+@pytest.mark.parametrize("matching_list", [False, True])
+def test_endpoint_trace_exposes_an_omitted_selector_member(matching_list) -> None:
+    address = "192.0.2.25"
+    members = ["198.51.100.9"] * 200 + [address]
+
+    class TruncatedSelectorsApi(FixtureApi):
+        def get_all(self, path: str) -> api.PageResult:
+            page = super().get_all(path)
+            if path.endswith("/firewall/policies"):
+                page.items[0]["source"] = {
+                    "trafficFilter": {
+                        "ipAddressFilter": (
+                            {"trafficMatchingListId": self.list_id}
+                            if matching_list
+                            else {"items": [{"value": member} for member in members]}
+                        )
+                    }
+                }
+                page.items[0]["destination"] = {}
+            if matching_list and path.endswith("/traffic-matching-lists"):
+                page.items[0]["items"] = [
+                    {"type": "IP_ADDRESS", "value": member} for member in members
+                ]
+            return page
+
+    fixture = TruncatedSelectorsApi()
+    report = api.build_firewall_policies(fixture, None, None, None)
+    policy = report["sites"][0]["policies"][0]
+    truncated = policy["traffic_matching_lists"][0] if matching_list else policy
+    assert truncated["truncated"] is True
+    trace = api.build_endpoint_trace(fixture, address)
+    assert trace["matches"][0]["policy_references"] == []
+    assert trace["partial"] is True
+    assert trace["truncated"] is True

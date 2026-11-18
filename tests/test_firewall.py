@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import http.client
 import json
 import time
 from uuid import UUID
 
+import httpx2
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.exceptions import ToolError
 
 from unifi_agent_mcp.broker import BrokerClient
 from unifi_agent_mcp.executor import execute, reconcile, verify_claim
@@ -261,4 +266,103 @@ def test_broker_outages_refuse_requests_without_a_controller_write(failure):
     preview = controller.create_preview(SITE, new_rule(), "Prepare")
     with pytest.raises(UniFiApiError, match="UNIFI_BROKER_UNAVAILABLE"):
         broker.submit(preview)
+    assert api.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        http.client.RemoteDisconnected(),
+        ConnectionResetError(),
+        http.client.IncompleteRead(b"{}"),
+    ],
+)
+def test_applied_edit_is_read_back_after_a_transport_failure(failure, monkeypatch):
+    controller, api = fixture()
+    create = controller.create_preview(SITE, new_rule(), "Create")
+    assert approved(controller, create)["state"] == "succeeded"
+    edit = controller.change_preview(SITE, POLICY, "Edit", EditRule(enabled=True))
+    apply_change = api._request
+
+    class LostResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self, bound):
+            raise failure
+
+    class ApplyThenDisconnect:
+        def open(self, request, *, timeout):
+            assert request.method == "PUT"
+            apply_change(
+                request.method,
+                request.selector,
+                body=json.loads(request.data),
+            )
+            return LostResponse()
+
+    transport = UniFiNetworkApi(
+        api_config("https://controller.example.test/integration", "synthetic-key"),
+        opener=ApplyThenDisconnect(),
+    )
+    monkeypatch.setattr(api, "_request", transport._request)
+    assert approved(controller, edit)["state"] == "succeeded"
+    assert [request[0] for request in api.calls] == ["POST", "PUT"]
+
+
+def test_authenticated_inspection_cannot_discover_or_submit_firewall_requests():
+    controller, api = fixture()
+    proposals = []
+
+    class SyntheticBroker:
+        def submit(self, proposal):
+            proposals.append(proposal)
+            return {"status": "pending"}
+
+        def status(self, request_id):
+            raise AssertionError("unexpected status call")
+
+    read_token, request_token = "a" * 32, "b" * 32
+    mcp = create_server(
+        api,
+        auth=_ConfiguredTokens(read_token, request_token),
+        approval=(controller, SyntheticBroker()),
+    )
+    app = mcp.http_app(path="/mcp", stateless_http=True)
+
+    def local_transport(**kwargs):
+        return httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), **kwargs)
+
+    def client(token):
+        return Client(
+            StreamableHttpTransport(
+                "http://mcp.example.test/mcp",
+                headers={"Authorization": f"Bearer {token}"},
+                httpx_client_factory=local_transport,
+            )
+        )
+
+    tool_name = "unifi_firewall_create_request"
+    parameters = {
+        "site_id": str(SITE),
+        "rule": new_rule().model_dump(mode="json"),
+        "reason": "Test scoped credentials",
+    }
+
+    async def verify_scope():
+        async with app.router.lifespan_context(app):
+            async with client(read_token) as reader:
+                assert len(await reader.list_tools()) == 4
+                with pytest.raises(ToolError):
+                    await reader.call_tool(tool_name, parameters)
+                assert proposals == []
+            async with client(request_token) as requester:
+                assert tool_name in {tool.name for tool in await requester.list_tools()}
+                await requester.call_tool(tool_name, parameters)
+
+    asyncio.run(verify_scope())
+    assert len(proposals) == 1
     assert api.calls == []

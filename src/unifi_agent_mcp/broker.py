@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import ssl
@@ -85,7 +86,7 @@ class BrokerClient:
                 else "UNIFI_BROKER_UNAVAILABLE"
             )
             raise UniFiApiError(code, f"broker returned HTTP {error.code}") from None
-        except (ssl.SSLError, OSError, UniFiApiError):
+        except (OSError, http.client.HTTPException, UniFiApiError):
             raise UniFiApiError(
                 "UNIFI_BROKER_UNAVAILABLE", "broker request failed"
             ) from None
