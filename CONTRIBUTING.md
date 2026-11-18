@@ -7,3 +7,5 @@ Open pull requests against `main`. Use [Conventional Commits](https://www.conven
 The protected branch requires green CI and independent review of the exact pull request head. Merge Guard may merge approved changes in the paths declared in [.github/merge-guard.toml](.github/merge-guard.toml). A maintainer merges changes to workflows, tests, scripts, dependencies, release manifests, and other guarded paths.
 
 Release Please prepares a release pull request from versioned changes. A maintainer approves the exact version and source commit before merging it. The workflow reads the repository secret `RELEASE_PLEASE_TOKEN`.
+
+After the merge, Release Please creates the version tag and a draft GitHub release. Build the wheel from that tag and test it in a clean environment. Upload the approved wheel and its SHA-256 checksum to the draft, then publish it. Publishing makes the assets immutable. [GitHub release management](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)

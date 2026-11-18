@@ -12,7 +12,9 @@
           "path": "uv.lock",
           "jsonpath": "$.package[?(@.name.value=='unifi-agent-mcp')].version"
         }
-      ]
+      ],
+      "draft": true,
+      "force-tag-creation": true
     }
   }
 }
