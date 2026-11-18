@@ -1,0 +1,15 @@
+schema: spec-driven
+
+context: |
+  UniFi Agent MCP provides access to UniFi Network through MCP.
+  Read-only operation is the default. An optional approval integration submits
+  typed user-defined firewall changes to a broker. A dedicated executor applies
+  approved changes. Deployers configure credentials and controller policy.
+
+rules:
+  proposal:
+    - Describe the user-visible change and affected trust boundaries.
+  specs:
+    - Cover successful use, refusals, and recovery after uncertain outcomes.
+  tasks:
+    - Verify changes against the installed release artifact when installation changes.

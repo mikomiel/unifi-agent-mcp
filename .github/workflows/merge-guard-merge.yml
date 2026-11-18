@@ -1,0 +1,42 @@
+name: merge-guard merge
+
+on:
+  workflow_run:
+    workflows: ["merge-guard review"]
+    types: [completed]
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: merge-guard-merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    outputs:
+      merged: ${{ steps.guard.outputs.merged }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - id: guard
+        uses: mikomiel/merge-guard@647f49640a6d444b0b7481799df89ae376371f37
+        with:
+          mode: merge
+
+  release:
+    needs: merge
+    if: ${{ needs.merge.outputs.merged == 'true' }}
+    uses: ./.github/workflows/release-please.yml
+    secrets:
+      RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
